@@ -1,0 +1,1813 @@
+import random
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import tkinter as tk
+from tkinter import ttk
+from abc import ABC, abstractmethod
+import logging
+
+
+# Configure logging to output to console
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+class Problem(ABC):
+    def __init__(self, name):
+        self.name = name
+
+    @abstractmethod
+    def generate_data(self, size):
+        pass
+
+    @abstractmethod
+    def evaluate(self, solution):
+        pass
+
+    @abstractmethod
+    def get_solution_str(self, solution):
+        pass
+
+
+class KnapsackProblem(Problem):
+    def __init__(self, name="Knapsack"):
+        super().__init__(name)
+
+    def generate_data(self, size):
+        weights = [random.randint(1, 50) for _ in range(size)]
+        values = [random.randint(10, 100) for _ in range(size)]
+        capacity = sum(weights) // 2
+        return weights, values, capacity
+
+    def evaluate(self, solution, weights, values, capacity):
+        total_weight = sum(weights[i] for i, selected in enumerate(solution) if selected)
+        total_value = sum(values[i] for i, selected in enumerate(solution) if selected)
+        if total_weight > capacity:
+            return -float('inf')
+        return total_value
+
+    def get_solution_str(self, solution):
+        if solution is None:
+            return "No solution found."
+        return f"Items selected: {', '.join(str(i) for i, selected in enumerate(solution) if selected)}, total items: {sum(solution)}"
+
+
+class TSPProblem(Problem):
+    def __init__(self, name="TSP"):
+        super().__init__(name)
+
+    def generate_data(self, size):
+        coords = [(random.randint(0, 100), random.randint(0, 100)) for _ in range(size)]
+        return coords
+
+    def evaluate(self, solution, coords):
+        distance = 0
+        for i in range(len(solution) - 1):
+            x1, y1 = coords[solution[i]]
+            x2, y2 = coords[solution[i + 1]]
+            distance += np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+        # Add distance back to start
+        x1, y1 = coords[solution[-1]]
+        x2, y2 = coords[solution[0]]
+        distance += np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+        return -distance  # We want to minimize distance, but optimization is for maximizing
+
+    def get_solution_str(self, solution):
+        return f"Path: {solution}"
+
+
+class Algorithm(ABC):
+    def __init__(self, name):
+        self.name = name
+        self.results = {}
+
+    @abstractmethod
+    def solve(self, problem, data, *args):
+        pass
+
+    def get_results_str(self):
+        output = f"{self.name}:\n"
+        for size, result in self.results.items():
+            output += f"Size: {size}, Best Value: {result['best_value']:.2f}, Time: {result['time']:.4f} s, Solution: {result['solution']}\n"
+        return output
+
+
+class Backtracking(Algorithm):
+    def __init__(self, name="Backtracking"):
+        super().__init__(name)
+
+    def solve(self, problem, data, *args):
+        if problem.name == "Knapsack":
+            weights, values, capacity = data
+            n = len(weights)
+            best_value = 0
+            best_solution = None
+
+            def backtrack(index, current_weight, current_value, current_solution):
+                nonlocal best_value, best_solution
+                if index == n:
+                    if current_value > best_value:
+                        best_value = current_value
+                        best_solution = current_solution[:]
+                    return
+
+                # Try including the item
+                if current_weight + weights[index] <= capacity:
+                    current_solution.append(True)
+                    backtrack(index + 1, current_weight + weights[index], current_value + values[index],
+                              current_solution)
+                    current_solution.pop()
+
+                # Try excluding the item
+                current_solution.append(False)
+                backtrack(index + 1, current_weight, current_value, current_solution)
+                current_solution.pop()
+
+            start_time = time.time()
+            backtrack(0, 0, 0, [])
+            end_time = time.time()
+
+            solution_str = problem.get_solution_str(best_solution)
+            return {"best_value": best_value, "time": end_time - start_time, "solution": solution_str}
+
+        elif problem.name == "TSP":
+            coords = data
+            n = len(coords)
+            best_distance = float('inf')
+            best_path = None
+
+            def backtrack(current_path, visited, current_distance):
+                nonlocal best_distance, best_path
+                if len(current_path) == n:
+                    # Calculate distance to return to start
+                    x1, y1 = coords[current_path[-1]]
+                    x2, y2 = coords[current_path[0]]
+                    current_distance += np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                    if current_distance < best_distance:
+                        best_distance = current_distance
+                        best_path = current_path[:]
+                    return
+
+                for next_city in range(n):
+                    if next_city not in visited:
+                        current_path.append(next_city)
+                        visited.add(next_city)
+
+                        if len(current_path) > 1:
+                            x1, y1 = coords[current_path[-2]]
+                            x2, y2 = coords[current_path[-1]]
+                            dist_add = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                        else:
+                            dist_add = 0
+
+                        backtrack(current_path, visited, current_distance + dist_add)
+                        current_path.pop()
+                        visited.remove(next_city)
+
+            start_time = time.time()
+            backtrack([0], {0}, 0)
+            end_time = time.time()
+
+            solution_str = problem.get_solution_str(best_path)
+            return {"best_value": -best_distance, "time": end_time - start_time, "solution": solution_str}
+
+
+class BranchAndBound(Algorithm):
+    def __init__(self, name="Branch and Bound"):
+        super().__init__(name)
+
+    def solve(self, problem, data, *args):
+        if problem.name == "Knapsack":
+            weights, values, capacity = data
+            n = len(weights)
+
+            class Node:
+                def __init__(self, level, weight, value, items):
+                    self.level = level
+                    self.weight = weight
+                    self.value = value
+                    self.items = items
+
+            def calculate_bound(node):
+                if node.weight >= capacity:
+                    return 0
+                bound = node.value
+                j = node.level + 1
+                total_weight = node.weight
+                while j < n and total_weight + weights[j] <= capacity:
+                    bound += values[j]
+                    total_weight += weights[j]
+                    j += 1
+                if j < n:
+                    bound += (capacity - total_weight) * values[j] / weights[j]
+                return bound
+
+            start_time = time.time()
+
+            queue = [Node(-1, 0, 0, [])]
+            max_value = 0
+            best_items = None
+
+            while queue:
+                node = queue.pop(0)
+                if node.level == n - 1:
+                    if node.value > max_value:
+                        max_value = node.value
+                        best_items = node.items
+                    continue
+
+                level = node.level + 1
+
+                # Include item
+                if node.weight + weights[level] <= capacity:
+                    new_node = Node(level, node.weight + weights[level], node.value + values[level],
+                                    node.items + [True])
+                    bound = calculate_bound(new_node)
+                    if bound > max_value:
+                        queue.append(new_node)
+
+                # Exclude item
+                new_node = Node(level, node.weight, node.value, node.items + [False])
+                bound = calculate_bound(new_node)
+                if bound > max_value:
+                    queue.append(new_node)
+
+            end_time = time.time()
+
+            solution_str = problem.get_solution_str(best_items)
+            return {"best_value": max_value, "time": end_time - start_time, "solution": solution_str}
+
+        elif problem.name == "TSP":
+            coords = data
+            n = len(coords)
+
+            class Node:
+                def __init__(self, path, cost, bound):
+                    self.path = path
+                    self.cost = cost
+                    self.bound = bound
+
+            def calculate_bound(node):
+                remaining_cities = set(range(n)) - set(node.path)
+
+                if not remaining_cities:
+                    return node.cost
+
+                min_edges = 0
+                for city in remaining_cities:
+                    min_dist = float('inf')
+                    for other_city in set(range(n)):
+                        if city != other_city:
+                            x1, y1 = coords[city]
+                            x2, y2 = coords[other_city]
+                            dist = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                            min_dist = min(min_dist, dist)
+                    min_edges += min_dist
+
+                if len(node.path) > 0:
+                    last_city = node.path[-1]
+                    min_dist = float('inf')
+                    for next_city in set(range(n)):
+                        if next_city not in node.path:
+                            x1, y1 = coords[last_city]
+                            x2, y2 = coords[next_city]
+                            dist = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                            min_dist = min(min_dist, dist)
+
+                    min_edges += min_dist
+
+                if len(node.path) > 0:
+                    start_city = node.path[0]
+                    min_dist = float('inf')
+                    for next_city in set(range(n)):
+                        if next_city != start_city and next_city not in node.path:
+                            x1, y1 = coords[start_city]
+                            x2, y2 = coords[next_city]
+                            dist = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                            min_dist = min(min_dist, dist)
+                    min_edges += min_dist
+
+                return node.cost + min_edges / 2 if min_edges > 0 else node.cost
+
+            start_time = time.time()
+
+            initial_node = Node([0], 0, 0)
+            initial_node.bound = calculate_bound(initial_node)
+
+            queue = [initial_node]
+            best_path = None
+            min_cost = float('inf')
+
+            while queue:
+                queue.sort(key=lambda x: x.bound)
+                node = queue.pop(0)
+
+                if node.bound >= min_cost:
+                    continue
+
+                if len(node.path) == n:
+                    if node.cost < min_cost:
+                        min_cost = node.cost
+                        best_path = node.path
+                    continue
+
+                last_node = node.path[-1]
+                for next_city in range(n):
+                    if next_city not in node.path:
+                        x1, y1 = coords[last_node]
+                        x2, y2 = coords[next_city]
+                        dist = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                        new_path = node.path + [next_city]
+                        new_cost = node.cost + dist
+                        new_node = Node(new_path, new_cost, 0)
+                        new_node.bound = calculate_bound(new_node)
+                        if new_node.bound < min_cost:
+                            queue.append(new_node)
+
+            end_time = time.time()
+            solution_str = problem.get_solution_str(best_path)
+            return {"best_value": -min_cost, "time": end_time - start_time, "solution": solution_str}
+
+
+class GeneticAlgorithm(Algorithm):
+    def __init__(self, name="Genetic Algorithm", population_size=100, generations=50, mutation_rate=0.01):
+        super().__init__(name)
+        self.population_size = population_size
+        self.generations = generations
+        self.mutation_rate = mutation_rate
+
+    def _initialize_population(self, problem, data):
+        if problem.name == "Knapsack":
+            size = len(data[0])
+            return [np.random.randint(0, 2, size) for _ in range(self.population_size)]
+        elif problem.name == "TSP":
+            size = len(data)
+            population = []
+            for _ in range(self.population_size):
+                path = list(range(size))
+                random.shuffle(path)
+                population.append(path)
+            return population
+
+    def _fitness_function(self, problem, solution, data):
+        if problem.name == "Knapsack":
+            weights, values, capacity = data
+            return problem.evaluate(solution, weights, values, capacity)
+        elif problem.name == "TSP":
+            coords = data
+            return problem.evaluate(solution, coords)
+
+    def _selection(self, problem, population, data):
+        fitness_scores = [self._fitness_function(problem, individual, data) for individual in population]
+
+        if problem.name == "Knapsack":
+            sorted_population = [x for _, x in
+                                 sorted(zip(fitness_scores, population), key=lambda pair: pair[0], reverse=True)]
+        elif problem.name == "TSP":
+            sorted_population = [x for _, x in sorted(zip(fitness_scores, population), key=lambda pair: pair[0])]
+
+        selected_indices = list(range(int(self.population_size * 0.5)))
+        return [sorted_population[i] for i in selected_indices]
+
+    def _crossover(self, parent1, parent2, problem):
+        if problem.name == "Knapsack":
+            crossover_point = random.randint(1, len(parent1) - 1)
+            child1 = np.concatenate((parent1[:crossover_point], parent2[crossover_point:]))
+            child2 = np.concatenate((parent2[:crossover_point], parent1[crossover_point:]))
+            return child1, child2
+        elif problem.name == "TSP":
+            size = len(parent1)
+            start, end = sorted(random.sample(range(size), 2))
+            child1 = [-1] * size
+            child1[start:end + 1] = parent1[start:end + 1]
+
+            p2_index = 0
+            for i in range(size):
+                if child1[i] == -1:
+                    while parent2[p2_index] in child1:
+                        p2_index += 1
+                    child1[i] = parent2[p2_index]
+
+            child2 = [-1] * size
+            child2[start:end + 1] = parent2[start:end + 1]
+            p1_index = 0
+            for i in range(size):
+                if child2[i] == -1:
+                    while parent1[p1_index] in child2:
+                        p1_index += 1
+                    child2[i] = parent1[p1_index]
+            return child1, child2
+
+    def _mutation(self, individual, problem):
+        if problem.name == "Knapsack":
+            for i in range(len(individual)):
+                if random.random() < self.mutation_rate:
+                    individual[i] = 1 - individual[i]
+            return individual
+        elif problem.name == "TSP":
+            size = len(individual)
+            if random.random() < self.mutation_rate:
+                i, j = random.sample(range(size), 2)
+                individual[i], individual[j] = individual[j], individual[i]
+            return individual
+
+    def solve(self, problem, data, *args):
+        start_time = time.time()
+        population = self._initialize_population(problem, data)
+        best_solution = None
+        best_fitness = float('-inf') if problem.name == "Knapsack" else float('inf')
+
+        for _ in range(self.generations):
+            selected_pop = self._selection(problem, population, data)
+            next_gen = selected_pop[:]
+
+            while len(next_gen) < self.population_size:
+                parent1, parent2 = random.sample(selected_pop, 2)
+                child1, child2 = self._crossover(parent1, parent2, problem)
+                next_gen.append(self._mutation(child1, problem))
+                next_gen.append(self._mutation(child2, problem))
+
+            population = next_gen
+
+            for ind in population:
+                fitness = self._fitness_function(problem, ind, data)
+                if problem.name == "Knapsack" and fitness > best_fitness:
+                    best_fitness = fitness
+                    best_solution = ind
+                elif problem.name == "TSP" and fitness < best_fitness:
+                    best_fitness = fitness
+                    best_solution = ind
+
+        end_time = time.time()
+        solution_str = problem.get_solution_str(best_solution)
+        return {"best_value": best_fitness, "time": end_time - start_time, "solution": solution_str}
+
+
+class SimulatedAnnealing(Algorithm):
+    def __init__(self, name="Simulated Annealing", initial_temperature=100, cooling_rate=0.95, num_iterations=1000):
+        super().__init__(name)
+        self.initial_temperature = initial_temperature
+        self.cooling_rate = cooling_rate
+        self.num_iterations = num_iterations
+
+    def _generate_neighbor(self, problem, solution):
+        if problem.name == "Knapsack":
+            index = random.randint(0, len(solution) - 1)
+            neighbor = solution[:]
+            neighbor[index] = 1 - neighbor[index]
+            return neighbor
+        elif problem.name == "TSP":
+            size = len(solution)
+            i, j = random.sample(range(size), 2)
+            neighbor = solution[:]
+            neighbor[i], neighbor[j] = neighbor[j], neighbor[i]
+            return neighbor
+
+    def solve(self, problem, data, *args):
+        start_time = time.time()
+
+        if problem.name == "Knapsack":
+            initial_solution = np.random.randint(0, 2, len(data[0])).tolist()
+            weights, values, capacity = data  # Unpack data for Knapsack
+
+            best_solution = initial_solution  # Initialize best_solution here
+            best_value = problem.evaluate(initial_solution, weights, values, capacity)
+            current_solution = initial_solution
+            current_value = best_value
+            temperature = self.initial_temperature
+
+            for _ in range(self.num_iterations):
+                neighbor_solution = self._generate_neighbor(problem, current_solution)
+                neighbor_value = problem.evaluate(neighbor_solution, weights, values, capacity)
+
+                delta_value = neighbor_value - current_value
+                if delta_value > 0 or random.random() < np.exp(delta_value / temperature):
+                    current_solution = neighbor_solution
+                    current_value = neighbor_value
+                    if current_value > best_value:
+                        best_value = current_value
+                        best_solution = current_solution
+
+        elif problem.name == "TSP":
+            initial_solution = list(range(len(data)))
+            random.shuffle(initial_solution)
+            coords = data
+
+            best_solution = initial_solution  # Initialize best_solution here
+            best_value = problem.evaluate(initial_solution, coords)
+            current_solution = initial_solution
+            current_value = best_value
+            temperature = self.initial_temperature
+
+            for _ in range(self.num_iterations):
+                neighbor_solution = self._generate_neighbor(problem, current_solution)
+                neighbor_value = problem.evaluate(neighbor_solution, coords)
+
+                delta_value = neighbor_value - current_value
+                if delta_value < 0 or random.random() < np.exp(-delta_value / temperature):
+                    current_solution = neighbor_solution
+                    current_value = neighbor_value
+                    if current_value < best_value:
+                        best_value = current_value
+                        best_solution = current_solution
+
+            temperature *= self.cooling_rate
+
+        end_time = time.time()
+        solution_str = problem.get_solution_str(best_solution)
+        return {"best_value": best_value, "time": end_time - start_time, "solution": solution_str}
+
+
+class ParticleSwarmOptimization(Algorithm):
+    def __init__(self, name="Particle Swarm Optimization", population_size=50, iterations=100, c1=2, c2=2, w=0.7):
+        super().__init__(name)
+        self.population_size = population_size
+        self.iterations = iterations
+        self.c1 = c1  # Cognitive coefficient
+        self.c2 = c2  # Social coefficient
+        self.w = w  # Inertia weight
+
+    def _initialize_population(self, problem, data):
+        if problem.name == "Knapsack":
+            size = len(data[0])
+            population = []
+            for _ in range(self.population_size):
+                position = np.random.rand(size)  # Random positions between 0 and 1
+                velocity = np.random.rand(size) / 10  # Initialize velocity
+                population.append({"position": position, "velocity": velocity, "best_position": position,
+                                   "best_value": float('-inf')})
+            return population
+        elif problem.name == "TSP":
+            size = len(data)
+            population = []
+            for _ in range(self.population_size):
+                position = np.random.permutation(size)  # Random permutation
+                velocity = np.random.rand(size) / 10
+                population.append(
+                    {"position": position, "velocity": velocity, "best_position": position, "best_value": float('inf')})
+            return population
+
+    def _fitness_function(self, problem, solution, data):
+        if problem.name == "Knapsack":
+            weights, values, capacity = data
+            # Convert position to binary based on threshold of 0.5
+            binary_solution = [1 if pos > 0.5 else 0 for pos in solution]
+            return problem.evaluate(binary_solution, weights, values, capacity)
+        elif problem.name == "TSP":
+            coords = data
+            return problem.evaluate(solution, coords)
+
+    def solve(self, problem, data, *args):
+        start_time = time.time()
+        population = self._initialize_population(problem, data)
+        global_best_solution = None
+        global_best_value = float('-inf') if problem.name == "Knapsack" else float('inf')
+
+        for _ in range(self.iterations):
+            for particle in population:
+
+                if problem.name == "Knapsack":
+                    # Update each particle's best position if necessary
+                    fitness = self._fitness_function(problem, particle["position"], data)
+                    if fitness > particle["best_value"]:
+                        particle["best_value"] = fitness
+                        particle["best_position"] = particle["position"].copy()
+                    # Update global best if necessary
+                    if fitness > global_best_value:
+                        global_best_value = fitness
+                        global_best_solution = particle["position"].copy()
+                elif problem.name == "TSP":
+                    fitness = self._fitness_function(problem, particle["position"], data)
+                    if fitness < particle["best_value"]:
+                        particle["best_value"] = fitness
+                        particle["best_position"] = particle["position"].copy()
+                    # Update global best if necessary
+                    if fitness < global_best_value:
+                        global_best_value = fitness
+                        global_best_solution = particle["position"].copy()
+
+            for particle in population:
+                # Update velocity and position
+                r1 = np.random.rand(len(particle["position"]))
+                r2 = np.random.rand(len(particle["position"]))
+
+                cognitive_velocity = self.c1 * r1 * (particle["best_position"] - particle["position"])
+                social_velocity = self.c2 * r2 * (global_best_solution - particle["position"])
+
+                particle["velocity"] = self.w * particle["velocity"] + cognitive_velocity + social_velocity
+
+                if problem.name == "Knapsack":
+                    particle["position"] = particle["position"] + particle["velocity"]
+                elif problem.name == "TSP":
+                    new_position = particle["position"] + particle["velocity"]
+                    particle["position"] = np.argsort(new_position)
+
+        end_time = time.time()
+        if problem.name == "Knapsack":
+            binary_solution = [1 if pos > 0.5 else 0 for pos in global_best_solution]
+            solution_str = problem.get_solution_str(binary_solution)
+        elif problem.name == "TSP":
+            solution_str = problem.get_solution_str(global_best_solution)
+        return {"best_value": global_best_value, "time": end_time - start_time, "solution": solution_str}
+
+
+# GUI Setup
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Algorithm Visualizer")
+        self.geometry("1200x800")
+        self.problem = None
+        self.algorithms = {}
+        self.data = None
+        self.results = {}
+        self.setup_ui()
+
+    def visualize_time_and_value(self):
+        # Clear existing plots
+        self.time_ax.clear()
+        self.value_ax.clear()
+
+        # Define a list of colors to use for different algorithms
+        colors = ['r', 'g', 'b', 'c', 'm', 'y', 'k']  # Add more if needed
+
+        if self.problem.name == "Knapsack":
+            sizes = {}
+            times = {}
+            values = {}
+
+            for alg_name, alg_instance in self.results.items():
+                sizes[alg_name] = []
+                times[alg_name] = []
+                values[alg_name] = []
+                for size, result in alg_instance.results.items():
+                    sizes[alg_name].append(size)
+                    times[alg_name].append(result['time'])
+                    values[alg_name].append(result['best_value'])
+
+            # Time vs Size Scatter Plot
+            for i, alg_name in enumerate(self.results.keys()):
+                color = colors[i % len(colors)]
+                self.time_ax.scatter(sizes[alg_name], times[alg_name], label=alg_name, color=color)
+            self.time_ax.set_xlabel("Data Size")
+            self.time_ax.set_ylabel("Time (s)")
+            self.time_ax.set_title("Time vs Data Size")
+            self.time_ax.legend()
+            self.time_canvas.draw()
+
+            # Value vs Size Scatter Plot
+            for i, alg_name in enumerate(self.results.keys()):
+                color = colors[i % len(colors)]
+                self.value_ax.scatter(sizes[alg_name], values[alg_name], label=alg_name, color=color)
+            self.value_ax.set_xlabel("Data Size")
+            self.value_ax.set_ylabel("Best Value")
+            self.value_ax.set_title("Best Value vs Data Size")
+            self.value_ax.legend()
+            self.value_canvas.draw()
+
+        elif self.problem.name == "TSP":
+            sizes = {}
+            times = {}
+            values = {}
+            for alg_name, alg_instance in self.results.items():
+                sizes[alg_name] = []
+                times[alg_name] = []
+                values[alg_name] = []
+                for size, result in alg_instance.results.items():
+                    sizes[alg_name].append(size)
+                    times[alg_name].append(result['time'])
+                    values[alg_name].append(result['best_value'])
+
+            # Time vs Size Scatter Plot
+            for i, alg_name in enumerate(self.results.keys()):
+                color = colors[i % len(colors)]
+                self.time_ax.scatter(sizes[alg_name], times[alg_name], label=alg_name, color=color)
+            self.time_ax.set_xlabel("Data Size")
+            self.time_ax.set_ylabel("Time (s)")
+            self.time_ax.set_title("Time vs Data Size")
+            self.time_ax.legend()
+            self.time_canvas.draw()
+
+            # Value vs Size Scatter Plot
+            for i, alg_name in enumerate(self.results.keys()):
+                color = colors[i % len(colors)]
+                self.value_ax.scatter(sizes[alg_name], values[alg_name], label=alg_name, color=color)
+            self.value_ax.set_xlabel("Data Size")
+            self.value_ax.set_ylabel("Best Value")
+            self.value_ax.set_title("Best Value vs Data Size")
+            self.value_ax.legend()
+            self.value_canvas.draw()
+
+    def setup_ui(self):
+        # Problem Type Selection
+        problem_frame = ttk.LabelFrame(self, text="Problem Selection")
+        problem_frame.pack(pady=10, padx=10, fill=tk.X)
+
+        ttk.Label(problem_frame, text="Select Problem:").pack(side=tk.LEFT, padx=5)
+        self.problem_var = tk.StringVar()
+        self.problem_dropdown = ttk.Combobox(problem_frame, textvariable=self.problem_var, values=["Knapsack", "TSP"])
+        self.problem_dropdown.pack(side=tk.LEFT, padx=5)
+        self.problem_dropdown.set("Knapsack")
+
+        ttk.Label(problem_frame, text="Start Size:").pack(side=tk.LEFT, padx=5)
+        self.start_size_entry = ttk.Entry(problem_frame)
+        self.start_size_entry.insert(0, "10")
+        self.start_size_entry.pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(problem_frame, text="End Size:").pack(side=tk.LEFT, padx=5)
+        self.end_size_entry = ttk.Entry(problem_frame)
+        self.end_size_entry.insert(0, "100")
+        self.end_size_entry.pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(problem_frame, text="Step Size:").pack(side=tk.LEFT, padx=5)
+        self.step_size_entry = ttk.Entry(problem_frame)
+        self.step_size_entry.insert(0, "10")
+        self.step_size_entry.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(problem_frame, text="Generate Data", command=self.generate_data).pack(side=tk.LEFT, padx=5)
+
+        # Algorithm Selection
+        algorithm_frame = ttk.LabelFrame(self, text="Algorithm Selection")
+        algorithm_frame.pack(pady=10, padx=10, fill=tk.X)
+
+        algorithms = ["Backtracking", "Branch and Bound", "Genetic Algorithm", "Simulated Annealing",
+                      "Particle Swarm Optimization", "Greater Cane Rat Algorithm"]
+        self.algorithm_vars = {alg: tk.BooleanVar() for alg in algorithms}
+
+
+        for alg in algorithms:
+            check_button = ttk.Checkbutton(algorithm_frame, text=alg, variable=self.algorithm_vars[alg])
+            check_button.pack(side=tk.LEFT, padx=5)
+
+        # Run Button
+        ttk.Button(self, text="Run Algorithms", command=self.run_algorithms).pack(pady=10)
+
+        # Result Display
+        self.output_text = tk.Text(self, height=10, width=150)
+        self.output_text.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+
+        # Visualization Frame
+        visualization_frame = ttk.LabelFrame(self, text="Visualization")
+        visualization_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+
+        # Create a frame for the main visualization
+        main_vis_frame = ttk.Frame(visualization_frame)
+        main_vis_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.fig, self.ax = plt.subplots()
+        self.canvas = FigureCanvasTkAgg(self.fig, master=main_vis_frame)  # Embed in the main frame
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Create frames for time and value scatter plots
+        scatter_frame = ttk.Frame(visualization_frame)
+        scatter_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Time Scatter Plot
+        time_fig, self.time_ax = plt.subplots(figsize=(5, 4))
+        self.time_canvas = FigureCanvasTkAgg(time_fig, master=scatter_frame)
+        self.time_canvas.get_tk_widget().pack(side=tk.LEFT, padx=10, fill=tk.BOTH, expand=True)
+
+        # Value Scatter Plot
+        value_fig, self.value_ax = plt.subplots(figsize=(5, 4))
+        self.value_canvas = FigureCanvasTkAgg(value_fig, master=scatter_frame)
+        self.value_canvas.get_tk_widget().pack(side=tk.LEFT, padx=10, fill=tk.BOTH, expand=True)
+
+    def generate_data(self):
+        try:
+            start_size = int(self.start_size_entry.get())
+            end_size = int(self.end_size_entry.get())
+            step_size = int(self.step_size_entry.get())
+            problem_name = self.problem_var.get()
+            self.data = {}  # Store data for each size
+
+            if start_size > end_size:
+                self.output_text.insert(tk.END, "Invalid size! start size must not bigger than end size.\n")
+                logging.error("Invalid size entered for data generation.")
+                return
+            if step_size <= 0:
+                self.output_text.insert(tk.END, "Invalid size! step size must bigger than 0.\n")
+                logging.error("Invalid size entered for data generation.")
+
+            if problem_name == "Knapsack":
+                self.problem = KnapsackProblem()
+            elif problem_name == "TSP":
+                self.problem = TSPProblem()
+
+            for size in range(start_size, end_size + 1, step_size):
+                self.data[size] = self.problem.generate_data(size)
+
+                self.output_text.insert(tk.END, f"Generated data for {problem_name} with size {size}\n")
+                logging.info(f"Generated data for {problem_name} with size {size}")
+            self.display_data()
+
+
+        except ValueError:
+            self.output_text.insert(tk.END, "Invalid size. Please enter an integer.\n")
+            logging.error("Invalid size entered for data generation.")
+
+    def display_data(self):
+        self.ax.clear()
+        if self.problem.name == "Knapsack":
+            weights, values, capacity = self.data
+            self.ax.bar(range(len(weights)), values, label="Values")
+            self.ax.set_xlabel("Item Index")
+            self.ax.set_ylabel("Value")
+            self.ax.set_title(f"Knapsack items (Capacity:{capacity})")
+            self.ax.legend()
+        elif self.problem.name == "TSP":
+            coords = self.data
+            x = [coord[0] for coord in coords]
+            y = [coord[1] for coord in coords]
+            self.ax.scatter(x, y)
+            self.ax.set_xlabel("X Coordinate")
+            self.ax.set_ylabel("Y Coordinate")
+            self.ax.set_title("TSP Cities")
+            for i, coord in enumerate(coords):
+                self.ax.annotate(str(i), coord, textcoords="offset points", xytext=(5, 5), ha='center')
+
+        self.canvas.draw()
+
+    def run_algorithms(self):
+        if not self.data:
+            self.output_text.insert(tk.END, "Please generate data first.\n")
+            logging.warning("Attempted to run algorithms without generated data.")
+            return
+
+        self.output_text.delete(1.0, tk.END)
+
+        selected_algorithms = [alg for alg, var in self.algorithm_vars.items() if var.get()]
+        if not selected_algorithms:
+            self.output_text.insert(tk.END, "Please select at least one algorithm.\n")
+            logging.warning("No algorithms selected for running.")
+            return
+
+        self.results = {}
+        for alg_name in selected_algorithms:
+            if alg_name == "Backtracking":
+                alg = Backtracking()
+            elif alg_name == "Branch and Bound":
+                alg = BranchAndBound()
+            elif alg_name == "Genetic Algorithm":
+                alg = GeneticAlgorithm()
+            elif alg_name == "Simulated Annealing":
+                alg = SimulatedAnnealing()
+            elif alg_name == "Particle Swarm Optimization":
+                alg = ParticleSwarmOptimization()
+            elif alg_name == "Greater Cane Rat Algorithm":
+                alg = GreaterCaneRatAlgorithm()
+
+            self.results[alg_name] = alg
+            for size, data in self.data.items():
+                result = alg.solve(self.problem, data)
+                alg.results[size] = result
+
+                self.output_text.insert(tk.END, f"{alg.get_results_str()}\n")
+                logging.info(f"Algorithm {alg_name} completed for problem {self.problem.name} with size {size}.")
+
+        self.visualize_results()
+
+    def visualize_results(self):
+        self.ax.clear()
+
+        if self.problem.name == "Knapsack":
+            # Handle Knapsack data (self.data is a dictionary)
+            if not self.data:  # Check if self.data is empty
+                return  # Exit if no data
+
+            # Get the first set of data to draw the base graph.
+            first_size = next(iter(self.data))  # Get first key
+            weights, values, capacity = self.data[first_size]
+
+            self.ax.bar(range(len(weights)), values, label="Values")
+            self.ax.set_xlabel("Item Index")
+            self.ax.set_ylabel("Value")
+            self.ax.set_title(f"Knapsack items (Capacity:{capacity}), with solution highlights")
+            self.ax.legend()
+
+            for alg_name, alg_instance in self.results.items():
+                for size, result in alg_instance.results.items():
+                    if size in self.data:
+                        solution_str = result['solution']
+                        items = [int(item) for item in solution_str.split(": ")[1].split(", ") if item.isdigit()]
+
+                        if items:
+                            weights, values, _ = self.data[size]
+                            for item in items:
+                                self.ax.bar(item, values[item], color='red')
+        elif self.problem.name == "TSP":
+            # Handle TSP data (self.data is a dictionary)
+            if not self.data:  # Check if self.data is empty
+                return  # Exit if no data
+
+            # Get the first set of data to draw the base graph.
+            first_size = next(iter(self.data))  # Get first key
+            coords = self.data[first_size]
+            x = [coord[0] for coord in coords]
+            y = [coord[1] for coord in coords]
+            self.ax.scatter(x, y)
+            self.ax.set_xlabel("X Coordinate")
+            self.ax.set_ylabel("Y Coordinate")
+            self.ax.set_title("TSP Cities and Path")
+            for i, coord in enumerate(coords):
+                self.ax.annotate(str(i), coord, textcoords="offset points", xytext=(5, 5), ha='center')
+
+            for alg_name, alg_instance in self.results.items():
+                for size, result in alg_instance.results.items():
+                    if size in self.data:
+                        solution_str = result['solution']
+                        path = [int(city) for city in
+                                solution_str.split(": ")[1].replace('[', '').replace(']', '').split(", ")]
+                        if path:
+                            coords = self.data[size]
+                            path_coords = [coords[i] for i in path]
+                            self.ax.plot([coord[0] for coord in path_coords], [coord[1] for coord in path_coords],
+                                         marker='o', linestyle='-')
+        self.canvas.draw()
+        self.visualize_time_and_value()
+
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
+import random
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import tkinter as tk
+from tkinter import ttk
+from abc import ABC, abstractmethod
+import logging
+
+# Configure logging to output to console
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+class Problem(ABC):
+    def __init__(self, name):
+        self.name = name
+
+    @abstractmethod
+    def generate_data(self, size):
+        pass
+
+    @abstractmethod
+    def evaluate(self, solution):
+        pass
+
+    @abstractmethod
+    def get_solution_str(self, solution):
+        pass
+
+
+class KnapsackProblem(Problem):
+    def __init__(self, name="Knapsack"):
+        super().__init__(name)
+
+    def generate_data(self, size):
+        weights = [random.randint(1, 50) for _ in range(size)]
+        values = [random.randint(10, 100) for _ in range(size)]
+        capacity = sum(weights) // 2
+        return weights, values, capacity
+
+    def evaluate(self, solution, weights, values, capacity):
+        total_weight = sum(weights[i] for i, selected in enumerate(solution) if selected)
+        total_value = sum(values[i] for i, selected in enumerate(solution) if selected)
+        if total_weight > capacity:
+            return -float('inf')
+        return total_value
+
+    def get_solution_str(self, solution):
+        return f"Items selected: {', '.join(str(i) for i, selected in enumerate(solution) if selected)}, total items: {sum(solution)}"
+
+
+class TSPProblem(Problem):
+    def __init__(self, name="TSP"):
+        super().__init__(name)
+
+    def generate_data(self, size):
+        coords = [(random.randint(0, 100), random.randint(0, 100)) for _ in range(size)]
+        return coords
+
+    def evaluate(self, solution, coords):
+        distance = 0
+        for i in range(len(solution) - 1):
+            x1, y1 = coords[solution[i]]
+            x2, y2 = coords[solution[i + 1]]
+            distance += np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+        # Add distance back to start
+        x1, y1 = coords[solution[-1]]
+        x2, y2 = coords[solution[0]]
+        distance += np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+        return -distance  # We want to minimize distance, but optimization is for maximizing
+
+    def get_solution_str(self, solution):
+        return f"Path: {solution}"
+
+
+class Algorithm(ABC):
+    def __init__(self, name):
+        self.name = name
+        self.results = {}
+
+    @abstractmethod
+    def solve(self, problem, data, *args):
+        pass
+
+    def get_results_str(self):
+        output = f"{self.name}:\n"
+        for size, result in self.results.items():
+            output += f"Size: {size}, Best Value: {result['best_value']:.2f}, Time: {result['time']:.4f} s, Solution: {result['solution']}\n"
+        return output
+
+
+class Backtracking(Algorithm):
+    def __init__(self, name="Backtracking"):
+        super().__init__(name)
+
+    def solve(self, problem, data, *args):
+        if problem.name == "Knapsack":
+            weights, values, capacity = data
+            n = len(weights)
+            best_value = 0
+            best_solution = None
+
+            def backtrack(index, current_weight, current_value, current_solution):
+                nonlocal best_value, best_solution
+                if index == n:
+                    if current_value > best_value:
+                        best_value = current_value
+                        best_solution = current_solution[:]
+                    return
+
+                # Try including the item
+                if current_weight + weights[index] <= capacity:
+                    current_solution.append(True)
+                    backtrack(index + 1, current_weight + weights[index], current_value + values[index],
+                              current_solution)
+                    current_solution.pop()
+
+                # Try excluding the item
+                current_solution.append(False)
+                backtrack(index + 1, current_weight, current_value, current_solution)
+                current_solution.pop()
+
+            start_time = time.time()
+            backtrack(0, 0, 0, [])
+            end_time = time.time()
+
+            solution_str = problem.get_solution_str(best_solution)
+            return {"best_value": best_value, "time": end_time - start_time, "solution": solution_str}
+
+        elif problem.name == "TSP":
+            coords = data
+            n = len(coords)
+            best_distance = float('inf')
+            best_path = None
+
+            def backtrack(current_path, visited, current_distance):
+                nonlocal best_distance, best_path
+                if len(current_path) == n:
+                    # Calculate distance to return to start
+                    x1, y1 = coords[current_path[-1]]
+                    x2, y2 = coords[current_path[0]]
+                    current_distance += np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                    if current_distance < best_distance:
+                        best_distance = current_distance
+                        best_path = current_path[:]
+                    return
+
+                for next_city in range(n):
+                    if next_city not in visited:
+                        current_path.append(next_city)
+                        visited.add(next_city)
+
+                        if len(current_path) > 1:
+                            x1, y1 = coords[current_path[-2]]
+                            x2, y2 = coords[current_path[-1]]
+                            dist_add = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                        else:
+                            dist_add = 0
+
+                        backtrack(current_path, visited, current_distance + dist_add)
+                        current_path.pop()
+                        visited.remove(next_city)
+
+            start_time = time.time()
+            backtrack([0], {0}, 0)
+            end_time = time.time()
+
+            solution_str = problem.get_solution_str(best_path)
+            return {"best_value": -best_distance, "time": end_time - start_time, "solution": solution_str}
+
+
+class BranchAndBound(Algorithm):
+    def __init__(self, name="Branch and Bound"):
+        super().__init__(name)
+
+    def solve(self, problem, data, *args):
+        if problem.name == "Knapsack":
+            weights, values, capacity = data
+            n = len(weights)
+
+            class Node:
+                def __init__(self, level, weight, value, items):
+                    self.level = level
+                    self.weight = weight
+                    self.value = value
+                    self.items = items
+
+            def calculate_bound(node):
+                if node.weight >= capacity:
+                    return 0
+                bound = node.value
+                j = node.level + 1
+                total_weight = node.weight
+                while j < n and total_weight + weights[j] <= capacity:
+                    bound += values[j]
+                    total_weight += weights[j]
+                    j += 1
+                if j < n:
+                    bound += (capacity - total_weight) * values[j] / weights[j]
+                return bound
+
+            start_time = time.time()
+
+            queue = [Node(-1, 0, 0, [])]
+            max_value = 0
+            best_items = None
+
+            while queue:
+                node = queue.pop(0)
+                if node.level == n - 1:
+                    if node.value > max_value:
+                        max_value = node.value
+                        best_items = node.items
+                    continue
+
+                level = node.level + 1
+
+                # Include item
+                if node.weight + weights[level] <= capacity:
+                    new_node = Node(level, node.weight + weights[level], node.value + values[level],
+                                    node.items + [True])
+                    bound = calculate_bound(new_node)
+                    if bound > max_value:
+                        queue.append(new_node)
+
+                # Exclude item
+                new_node = Node(level, node.weight, node.value, node.items + [False])
+                bound = calculate_bound(new_node)
+                if bound > max_value:
+                    queue.append(new_node)
+
+            end_time = time.time()
+
+            solution_str = problem.get_solution_str(best_items)
+            return {"best_value": max_value, "time": end_time - start_time, "solution": solution_str}
+
+        elif problem.name == "TSP":
+            coords = data
+            n = len(coords)
+
+            class Node:
+                def __init__(self, path, cost, bound):
+                    self.path = path
+                    self.cost = cost
+                    self.bound = bound
+
+            def calculate_bound(node):
+                remaining_cities = set(range(n)) - set(node.path)
+
+                if not remaining_cities:
+                    return node.cost
+
+                min_edges = 0
+                for city in remaining_cities:
+                    min_dist = float('inf')
+                    for other_city in set(range(n)):
+                        if city != other_city:
+                            x1, y1 = coords[city]
+                            x2, y2 = coords[other_city]
+                            dist = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                            min_dist = min(min_dist, dist)
+                    min_edges += min_dist
+
+                if len(node.path) > 0:
+                    last_city = node.path[-1]
+                    min_dist = float('inf')
+                    for next_city in set(range(n)):
+                        if next_city not in node.path:
+                            x1, y1 = coords[last_city]
+                            x2, y2 = coords[next_city]
+                            dist = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                            min_dist = min(min_dist, dist)
+
+                    min_edges += min_dist
+
+                if len(node.path) > 0:
+                    start_city = node.path[0]
+                    min_dist = float('inf')
+                    for next_city in set(range(n)):
+                        if next_city != start_city and next_city not in node.path:
+                            x1, y1 = coords[start_city]
+                            x2, y2 = coords[next_city]
+                            dist = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                            min_dist = min(min_dist, dist)
+                    min_edges += min_dist
+
+                return node.cost + min_edges / 2 if min_edges > 0 else node.cost
+
+            start_time = time.time()
+
+            initial_node = Node([0], 0, 0)
+            initial_node.bound = calculate_bound(initial_node)
+
+            queue = [initial_node]
+            best_path = None
+            min_cost = float('inf')
+
+            while queue:
+                queue.sort(key=lambda x: x.bound)
+                node = queue.pop(0)
+
+                if node.bound >= min_cost:
+                    continue
+
+                if len(node.path) == n:
+                    if node.cost < min_cost:
+                        min_cost = node.cost
+                        best_path = node.path
+                    continue
+
+                last_node = node.path[-1]
+                for next_city in range(n):
+                    if next_city not in node.path:
+                        x1, y1 = coords[last_node]
+                        x2, y2 = coords[next_city]
+                        dist = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+                        new_path = node.path + [next_city]
+                        new_cost = node.cost + dist
+                        new_node = Node(new_path, new_cost, 0)
+                        new_node.bound = calculate_bound(new_node)
+                        if new_node.bound < min_cost:
+                            queue.append(new_node)
+
+            end_time = time.time()
+            solution_str = problem.get_solution_str(best_path)
+            return {"best_value": -min_cost, "time": end_time - start_time, "solution": solution_str}
+
+
+class GeneticAlgorithm(Algorithm):
+    def __init__(self, name="Genetic Algorithm", population_size=100, generations=50, mutation_rate=0.01):
+        super().__init__(name)
+        self.population_size = population_size
+        self.generations = generations
+        self.mutation_rate = mutation_rate
+
+    def _initialize_population(self, problem, data):
+        if problem.name == "Knapsack":
+            size = len(data[0])
+            return [np.random.randint(0, 2, size) for _ in range(self.population_size)]
+        elif problem.name == "TSP":
+            size = len(data)
+            population = []
+            for _ in range(self.population_size):
+                path = list(range(size))
+                random.shuffle(path)
+                population.append(path)
+            return population
+
+    def _fitness_function(self, problem, solution, data):
+        if problem.name == "Knapsack":
+            weights, values, capacity = data
+            return problem.evaluate(solution, weights, values, capacity)
+        elif problem.name == "TSP":
+            coords = data
+            return problem.evaluate(solution, coords)
+
+    def _selection(self, problem, population, data):
+        fitness_scores = [self._fitness_function(problem, individual, data) for individual in population]
+
+        if problem.name == "Knapsack":
+            sorted_population = [x for _, x in
+                                 sorted(zip(fitness_scores, population), key=lambda pair: pair[0], reverse=True)]
+        elif problem.name == "TSP":
+            sorted_population = [x for _, x in sorted(zip(fitness_scores, population), key=lambda pair: pair[0])]
+
+        selected_indices = list(range(int(self.population_size * 0.5)))
+        return [sorted_population[i] for i in selected_indices]
+
+    def _crossover(self, parent1, parent2, problem):
+        if problem.name == "Knapsack":
+            crossover_point = random.randint(1, len(parent1) - 1)
+            child1 = np.concatenate((parent1[:crossover_point], parent2[crossover_point:]))
+            child2 = np.concatenate((parent2[:crossover_point], parent1[crossover_point:]))
+            return child1, child2
+        elif problem.name == "TSP":
+            size = len(parent1)
+            start, end = sorted(random.sample(range(size), 2))
+            child1 = [-1] * size
+            child1[start:end + 1] = parent1[start:end + 1]
+
+            p2_index = 0
+            for i in range(size):
+                if child1[i] == -1:
+                    while parent2[p2_index] in child1:
+                        p2_index += 1
+                    child1[i] = parent2[p2_index]
+
+            child2 = [-1] * size
+            child2[start:end + 1] = parent2[start:end + 1]
+            p1_index = 0
+            for i in range(size):
+                if child2[i] == -1:
+                    while parent1[p1_index] in child2:
+                        p1_index += 1
+                    child2[i] = parent1[p1_index]
+            return child1, child2
+
+    def _mutation(self, individual, problem):
+        if problem.name == "Knapsack":
+            for i in range(len(individual)):
+                if random.random() < self.mutation_rate:
+                    individual[i] = 1 - individual[i]
+            return individual
+        elif problem.name == "TSP":
+            size = len(individual)
+            if random.random() < self.mutation_rate:
+                i, j = random.sample(range(size), 2)
+                individual[i], individual[j] = individual[j], individual[i]
+            return individual
+
+    def solve(self, problem, data, *args):
+        start_time = time.time()
+        population = self._initialize_population(problem, data)
+        best_solution = None
+        best_fitness = float('-inf') if problem.name == "Knapsack" else float('inf')
+
+        for _ in range(self.generations):
+            selected_pop = self._selection(problem, population, data)
+            next_gen = selected_pop[:]
+
+            while len(next_gen) < self.population_size:
+                parent1, parent2 = random.sample(selected_pop, 2)
+                child1, child2 = self._crossover(parent1, parent2, problem)
+                next_gen.append(self._mutation(child1, problem))
+                next_gen.append(self._mutation(child2, problem))
+
+            population = next_gen
+
+            for ind in population:
+                fitness = self._fitness_function(problem, ind, data)
+                if problem.name == "Knapsack" and fitness > best_fitness:
+                    best_fitness = fitness
+                    best_solution = ind
+                elif problem.name == "TSP" and fitness < best_fitness:
+                    best_fitness = fitness
+                    best_solution = ind
+
+        end_time = time.time()
+        solution_str = problem.get_solution_str(best_solution)
+        return {"best_value": best_fitness, "time": end_time - start_time, "solution": solution_str}
+
+
+class SimulatedAnnealing(Algorithm):
+    def __init__(self, name="Simulated Annealing", initial_temperature=100, cooling_rate=0.95, num_iterations=1000):
+        super().__init__(name)
+        self.initial_temperature = initial_temperature
+        self.cooling_rate = cooling_rate
+        self.num_iterations = num_iterations
+
+    def _generate_neighbor(self, problem, solution):
+        if problem.name == "Knapsack":
+            index = random.randint(0, len(solution) - 1)
+            neighbor = solution[:]
+            neighbor[index] = 1 - neighbor[index]
+            return neighbor
+        elif problem.name == "TSP":
+            size = len(solution)
+            i, j = random.sample(range(size), 2)
+            neighbor = solution[:]
+            neighbor[i], neighbor[j] = neighbor[j], neighbor[i]
+            return neighbor
+
+    def solve(self, problem, data, *args):
+        start_time = time.time()
+
+        if problem.name == "Knapsack":
+            initial_solution = np.random.randint(0, 2, len(data[0])).tolist()
+        elif problem.name == "TSP":
+            initial_solution = list(range(len(data)))
+            random.shuffle(initial_solution)
+
+        best_solution = initial_solution
+        best_value = problem.evaluate(initial_solution, data, *args)
+        current_solution = initial_solution
+        current_value = best_value
+        temperature = self.initial_temperature
+
+        for _ in range(self.num_iterations):
+            neighbor_solution = self._generate_neighbor(problem, current_solution)
+            neighbor_value = problem.evaluate(neighbor_solution, data, *args)
+
+            delta_value = neighbor_value - current_value
+            if problem.name == "Knapsack":
+                if delta_value > 0 or random.random() < np.exp(delta_value / temperature):
+                    current_solution = neighbor_solution
+                    current_value = neighbor_value
+                    if current_value > best_value:
+                        best_value = current_value
+                        best_solution = current_solution
+            elif problem.name == "TSP":
+                if delta_value < 0 or random.random() < np.exp(-delta_value / temperature):
+                    current_solution = neighbor_solution
+                    current_value = neighbor_value
+                    if current_value < best_value:
+                        best_value = current_value
+                        best_solution = current_solution
+
+            temperature *= self.cooling_rate
+
+        end_time = time.time()
+        solution_str = problem.get_solution_str(best_solution)
+        return {"best_value": best_value, "time": end_time - start_time, "solution": solution_str}
+
+
+class GreaterCaneRatAlgorithm(Algorithm):
+    def __init__(self, name="Greater Cane Rat Algorithm", search_agents=30, max_iterations=100):
+        super().__init__(name)
+        self.search_agents = search_agents
+        self.max_iterations = max_iterations
+
+    def _initialize_population(self, problem, data):
+        if problem.name == "Knapsack":
+            dimension = len(data[0])
+            upper_bound = 1
+            lower_bound = 0
+        elif problem.name == "TSP":
+            dimension = len(data)
+            upper_bound = 1
+            lower_bound = 0
+
+        if isinstance(upper_bound, (int, float)):
+            positions = np.random.rand(self.search_agents, dimension) * (upper_bound - lower_bound) + lower_bound
+        elif isinstance(upper_bound, list):
+            positions = np.zeros((self.search_agents, dimension))
+            for i in range(dimension):
+                ub_i = upper_bound[i]
+                lb_i = lower_bound[i]
+                positions[:, i] = np.random.rand(self.search_agents) * (ub_i - lb_i) + lb_i
+        return positions
+
+    def solve(self, problem, data, *args):
+        start_time = time.time()
+        if problem.name == "Knapsack":
+            dimension = len(data[0])
+            upper_bound = 1
+            lower_bound = 0
+        elif problem.name == "TSP":
+            dimension = len(data)
+            upper_bound = 1
+            lower_bound = 0
+
+        positions = self._initialize_population(problem, data)
+        best_score = float('inf')
+        best_position = np.zeros(dimension)
+        alpha_pos1 = best_position
+        alpha_score = best_score
+
+        for i in range(self.search_agents):
+            if problem.name == "Knapsack":
+                flag_upper_bound = positions[i, :] > upper_bound
+                flag_lower_bound = positions[i, :] < lower_bound
+                positions[i, :] = (positions[i, :] * (~(
+                            flag_upper_bound + flag_lower_bound))) + upper_bound * flag_upper_bound + lower_bound * flag_lower_bound
+                binary_solution = [1 if pos > 0.5 else 0 for pos in positions[i, :]]
+                fitness = problem.evaluate(binary_solution, *data)
+            elif problem.name == "TSP":
+                flag_upper_bound = positions[i, :] > upper_bound
+                flag_lower_bound = positions[i, :] < lower_bound
+                positions[i, :] = (positions[i, :] * (~(
+                            flag_upper_bound + flag_lower_bound))) + upper_bound * flag_upper_bound + lower_bound * flag_lower_bound
+                tsp_solution = np.argsort(positions[i, :])
+                fitness = problem.evaluate(tsp_solution, data)
+            if fitness < best_score:
+                best_score = fitness
+                best_position = positions[i, :].copy()
+                alpha_pos1 = best_position
+                alpha_score = best_score
+
+        l = 0
+        convergence = np.zeros(self.max_iterations)
+        while l < self.max_iterations:
+            alpha_pos = np.max(alpha_pos1)
+            gr_m = random.randint(0, self.search_agents - 2)
+            gr_rho = 0.5
+            gr_r = alpha_score - l * (alpha_score / self.max_iterations)
+            gr_mu = random.randint(1, 4)
+            gr_c = random.random()
+            gr_alpha = 2 * gr_r * random.random() - gr_r
+            gr_beta = 2 * gr_r * gr_mu - gr_r
+
+            for i in range(self.search_agents):
+                positions[i, :] = (positions[i, :] + alpha_pos) / 2
+            for i in range(self.search_agents):
+                for j in range(dimension):
+                    if random.random() < gr_rho:
+                        if problem.name == "Knapsack":
+                            positions[i, j] = positions[i, j] + gr_c * (alpha_pos - gr_r * positions[i, j])
+                            flag_upper_bound = positions[i, j] > upper_bound
+                            flag_lower_bound = positions[i, j] < lower_bound
+                            positions[i, j] = (positions[i, j] * (~(
+                                        flag_upper_bound + flag_lower_bound))) + upper_bound * flag_upper_bound + lower_bound * flag_lower_bound
+                            binary_solution = [1 if pos > 0.5 else 0 for pos in positions[i, :]]
+                            fitness = problem.evaluate(binary_solution, *data)
+                        elif problem.name == "TSP":
+                            positions[i, j] = positions[i, j] + gr_c * (alpha_pos - gr_r * positions[i, j])
+                            flag_upper_bound = positions[i, j] > upper_bound
+                            flag_lower_bound = positions[i, j] < lower_bound
+                            positions[i, j] = (positions[i, j] * (~(
+                                        flag_upper_bound + flag_lower_bound))) + upper_bound * flag_upper_bound + lower_bound * flag_lower_bound
+                            tsp_solution = np.argsort(positions[i, :])
+                            fitness = problem.evaluate(tsp_solution, data)
+                        if fitness < best_score:
+                            best_score = fitness
+                            best_position = positions[i, :].copy()
+                        else:
+                            if problem.name == "Knapsack":
+                                positions[i, j] = positions[i, j] + gr_c * (positions[i, j] - gr_alpha * alpha_pos)
+                                flag_upper_bound = positions[i, j] > upper_bound
+                                flag_lower_bound = positions[i, j] < lower_bound
+                                positions[i, j] = (positions[i, j] * (~(
+                                            flag_upper_bound + flag_lower_bound))) + upper_bound * flag_upper_bound + lower_bound * flag_lower_bound
+                                binary_solution = [1 if pos > 0.5 else 0 for pos in positions[i, :]]
+                                fitness = problem.evaluate(binary_solution, *data)
+                            elif problem.name == "TSP":
+                                positions[i, j] = positions[i, j] + gr_c * (positions[i, j] - gr_alpha * alpha_pos)
+                                flag_upper_bound = positions[i, j] > upper_bound
+                                flag_lower_bound = positions[i, j] < lower_bound
+                                positions[i, j] = (positions[i, j] * (~(
+                                            flag_upper_bound + flag_lower_bound))) + upper_bound * flag_upper_bound + lower_bound * flag_lower_bound
+                                tsp_solution = np.argsort(positions[i, :])
+                                fitness = problem.evaluate(tsp_solution, data)
+                            if fitness < best_score:
+                                best_score = fitness
+                                best_position = positions[i, :].copy()
+                    else:
+                        if problem.name == "Knapsack":
+                            positions[i, j] = positions[i, j] + gr_c * (alpha_pos - gr_mu * positions[gr_m, j])
+                            flag_upper_bound = positions[i, j] > upper_bound
+                            flag_lower_bound = positions[i, j] < lower_bound
+                            positions[i, j] = (positions[i, j] * (~(
+                                        flag_upper_bound + flag_lower_bound))) + upper_bound * flag_upper_bound + lower_bound * flag_lower_bound
+                            binary_solution = [1 if pos > 0.5 else 0 for pos in positions[i, :]]
+                            fitness = problem.evaluate(binary_solution, *data)
+                        elif problem.name == "TSP":
+                            positions[i, j] = positions[i, j] + gr_c * (alpha_pos - gr_mu * positions[gr_m, j])
+                            flag_upper_bound = positions[i, j] > upper_bound
+                            flag_lower_bound = positions[i, j] < lower_bound
+                            positions[i, j] = (positions[i, j] * (~(
+                                        flag_upper_bound + flag_lower_bound))) + upper_bound * flag_upper_bound + lower_bound * flag_lower_bound
+                            tsp_solution = np.argsort(positions[i, :])
+                            fitness = problem.evaluate(tsp_solution, data)
+                        if fitness < best_score:
+                            best_score = fitness
+                            best_position = positions[i, :].copy()
+                        else:
+                            if problem.name == "Knapsack":
+                                positions[i, j] = positions[i, j] + gr_c * (positions[gr_m, j] - gr_beta * alpha_pos)
+                                flag_upper_bound = positions[i, j] > upper_bound
+                                flag_lower_bound = positions[i, j] < lower_bound
+                                positions[i, j] = (positions[i, j] * (~(
+                                            flag_upper_bound + flag_lower_bound))) + upper_bound * flag_upper_bound + lower_bound * flag_lower_bound
+                                binary_solution = [1 if pos > 0.5 else 0 for pos in positions[i, :]]
+                                fitness = problem.evaluate(binary_solution, *data)
+                            elif problem.name == "TSP":
+                                positions[i, j] = positions[i, j] + gr_c * (positions[gr_m, j] - gr_beta * alpha_pos)
+                                flag_upper_bound = positions[i, j] > upper_bound
+                                flag_lower_bound = positions[i, j] < lower_bound
+                                positions[i, j] = (positions[i, j] * (~(
+                                            flag_upper_bound + flag_lower_bound))) + upper_bound * flag_upper_bound + lower_bound * flag_lower_bound
+                                tsp_solution = np.argsort(positions[i, :])
+                                fitness = problem.evaluate(tsp_solution, data)
+                            if fitness < best_score:
+                                best_score = fitness
+                                best_position = positions[i, :].copy()
+                alpha_pos1 = best_position
+                alpha_score = best_score
+            l = l + 1
+            convergence[l - 1] = best_score
+        end_time = time.time()
+        if problem.name == "Knapsack":
+            binary_solution = [1 if pos > 0.5 else 0 for pos in best_position]
+            solution_str = problem.get_solution_str(binary_solution)
+        elif problem.name == "TSP":
+            tsp_solution = np.argsort(best_position)
+            solution_str = problem.get_solution_str(tsp_solution)
+        return {"best_value": best_score, "time": end_time - start_time, "solution": solution_str}
+
+
+# GUI Setup
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Algorithm Visualizer")
+        self.geometry("1200x800")
+        self.problem = None
+        self.algorithms = {}
+        self.data = None
+        self.results = {}
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Problem Type Selection
+        problem_frame = ttk.LabelFrame(self, text="Problem Selection")
+        problem_frame.pack(pady=10, padx=10, fill=tk.X)
+
+        ttk.Label(problem_frame, text="Select Problem:").pack(side=tk.LEFT, padx=5)
+        self.problem_var = tk.StringVar()
+        self.problem_dropdown = ttk.Combobox(problem_frame, textvariable=self.problem_var, values=["Knapsack", "TSP"])
+        self.problem_dropdown.pack(side=tk.LEFT, padx=5)
+        self.problem_dropdown.set("Knapsack")
+
+        ttk.Label(problem_frame, text="Data Size:").pack(side=tk.LEFT, padx=5)
+        self.size_entry = ttk.Entry(problem_frame)
+        self.size_entry.insert(0, "10")
+        self.size_entry.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(problem_frame, text="Generate Data", command=self.generate_data).pack(side=tk.LEFT, padx=5)
+
+        # Algorithm Selection
+        algorithm_frame = ttk.LabelFrame(self, text="Algorithm Selection")
+        algorithm_frame.pack(pady=10, padx=10, fill=tk.X)
+
+        algorithms = ["Backtracking", "Branch and Bound", "Genetic Algorithm", "Simulated Annealing",
+                      "Particle Swarm Optimization", "Greater Cane Rat Algorithm"]
+        self.algorithm_vars = {alg: tk.BooleanVar() for alg in algorithms}
+
+        for alg in algorithms:
+            check_button = ttk.Checkbutton(algorithm_frame, text=alg, variable=self.algorithm_vars[alg])
+            check_button.pack(side=tk.LEFT, padx=5)
+
+        # Run Button
+        ttk.Button(self, text="Run Algorithms", command=self.run_algorithms).pack(pady=10)
+
+        # Result Display
+        self.output_text = tk.Text(self, height=10, width=150)
+        self.output_text.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+
+        # Visualization Frame
+        visualization_frame = ttk.LabelFrame(self, text="Visualization")
+        visualization_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+
+        # Create a frame for the main visualization
+        main_vis_frame = ttk.Frame(visualization_frame)
+        main_vis_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.fig, self.ax = plt.subplots()
+        self.canvas = FigureCanvasTkAgg(self.fig, master=main_vis_frame)  # Embed in the main frame
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Create frames for time and value scatter plots
+        scatter_frame = ttk.Frame(visualization_frame)
+        scatter_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Time Scatter Plot
+        time_fig, self.time_ax = plt.subplots(figsize=(5, 4))
+        self.time_canvas = FigureCanvasTkAgg(time_fig, master=scatter_frame)
+        self.time_canvas.get_tk_widget().pack(side=tk.LEFT, padx=10, fill=tk.BOTH, expand=True)
+
+        # Value Scatter Plot
+        value_fig, self.value_ax = plt.subplots(figsize=(5, 4))
+        self.value_canvas = FigureCanvasTkAgg(value_fig, master=scatter_frame)
+        self.value_canvas.get_tk_widget().pack(side=tk.LEFT, padx=10, fill=tk.BOTH, expand=True)
+
+    def generate_data(self):
+        try:
+            size = int(self.size_entry.get())
+            problem_name = self.problem_var.get()
+            if problem_name == "Knapsack":
+                self.problem = KnapsackProblem()
+                self.data = self.problem.generate_data(size)
+            elif problem_name == "TSP":
+                self.problem = TSPProblem()
+                self.data = self.problem.generate_data(size)
+
+            self.output_text.insert(tk.END, f"Generated data for {problem_name} with size {size}\n")
+            logging.info(f"Generated data for {problem_name} with size {size}")
+            self.display_data()
+        except ValueError:
+            self.output_text.insert(tk.END, "Invalid size. Please enter an integer.\n")
+            logging.error("Invalid size entered for data generation.")
+
+    def display_data(self):
+        self.ax.clear()
+        if self.problem.name == "Knapsack":
+            weights, values, capacity = self.data
+            self.ax.bar(range(len(weights)), values, label="Values")
+            self.ax.set_xlabel("Item Index")
+            self.ax.set_ylabel("Value")
+            self.ax.set_title(f"Knapsack items (Capacity:{capacity})")
+            self.ax.legend()
+        elif self.problem.name == "TSP":
+            coords = self.data
+            x = [coord[0] for coord in coords]
+            y = [coord[1] for coord in coords]
+            self.ax.scatter(x, y)
+            self.ax.set_xlabel("X Coordinate")
+            self.ax.set_ylabel("Y Coordinate")
+            self.ax.set_title("TSP Cities")
+            for i, coord in enumerate(coords):
+                self.ax.annotate(str(i), coord, textcoords="offset points", xytext=(5, 5), ha='center')
+
+        self.canvas.draw()
+
+    def run_algorithms(self):
+        if self.problem is None:
+            self.output_text.insert(tk.END, "Please generate data first.\n")
+            logging.warning("Attempted to run algorithms without generated data.")
+            return
+
+        self.output_text.delete(1.0, tk.END)
+
+        selected_algorithms = [alg for alg, var in self.algorithm_vars.items() if var.get()]
+        if not selected_algorithms:
+            self.output_text.insert(tk.END, "Please select at least one algorithm.\n")
+            logging.warning("No algorithms selected for running.")
+            return
+
+        self.results = {}
+        for alg_name in selected_algorithms:
+            if alg_name == "Backtracking":
+                alg = Backtracking()
+            elif alg_name == "Branch and Bound":
+                alg = BranchAndBound()
+            elif alg_name == "Genetic Algorithm":
+                alg = GeneticAlgorithm()
+            elif alg_name == "Simulated Annealing":
+                alg = SimulatedAnnealing()
+            elif alg_name == "Greater Cane Rat Algorithm":
+                alg = GreaterCaneRatAlgorithm()
+
+            result = alg.solve(self.problem, self.data)
+            alg.results[len(self.data[0]) if self.problem.name == "Knapsack" else len(self.data)] = result
+            self.results[alg_name] = alg
+
+            self.output_text.insert(tk.END, f"{alg.get_results_str()}\n")
+            logging.info(f"Algorithm {alg_name} completed for problem {self.problem.name}.")
+
+        self.visualize_results()
+
+    def visualize_results(self):
+        self.ax.clear()
+        if self.problem.name == "Knapsack":
+            weights, values, capacity = self.data
+            self.ax.bar(range(len(weights)), values, label="Values")
+            self.ax.set_xlabel("Item Index")
+            self.ax.set_ylabel("Value")
+            self.ax.set_title(f"Knapsack items (Capacity:{capacity}), with solution highlights")
+            self.ax.legend()
+
+            for alg_name, alg_instance in self.results.items():
+                if len(alg_instance.results) > 0:
+                    result = alg_instance.results[len(weights)]
+                    solution_str = result['solution']
+                    items = [int(item) for item in solution_str.split(": ")[1].split(", ") if item.isdigit()]
+
+                    if items:
+                        for item in items:
+                            self.ax.bar(item, values[item], color='red')
+
+        elif self.problem.name == "TSP":
+            coords = self.data
+            x = [coord[0] for coord in coords]
+            y = [coord[1] for coord in coords]
+            self.ax.scatter(x, y)
+            self.ax.set_xlabel("X Coordinate")
+            self.ax.set_ylabel("Y Coordinate")
+            self.ax.set_title("TSP Cities and Path")
+            for i, coord in enumerate(coords):
+                self.ax.annotate(str(i), coord, textcoords="offset points", xytext=(5, 5), ha='center')
+
+            for alg_name, alg_instance in self.results.items():
+                if len(alg_instance.results) > 0:
+                    result = alg_instance.results[len(coords)]
+                    solution_str = result['solution']
+                    path = [int(city) for city in
+                            solution_str.split(": ")[1].replace('[', '').replace(']', '').split(", ")]
+
+                    if path:
+                        path_coords = [coords[i] for i in path]
+                        self.ax.plot([coord[0] for coord in path_coords], [coord[1] for coord in path_coords],
+                                     marker='o', linestyle='-')
+
+        self.canvas.draw()
+        # 调用新的方法来显示消耗时间和最优值的散点图
+        self.visualize_time_and_value()
+
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
